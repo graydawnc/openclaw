@@ -38,4 +38,9 @@ describe("markdown-links", () => {
     const out = normalizeFeishuMarkdownLinks("See https://example.com/path).");
     expect(out).toBe("See [https://example.com/path](https://example.com/path)).");
   });
+
+  it("normalizes destination of URL-labeled markdown link without double-wrapping label", () => {
+    const out = normalizeFeishuMarkdownLinks("[https://example.com/a_b](https://example.com/a_b)");
+    expect(out).toBe("[https://example.com/a_b](https://example.com/a%5Fb)");
+  });
 });

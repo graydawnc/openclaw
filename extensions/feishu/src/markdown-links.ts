@@ -1,6 +1,6 @@
 const FENCED_CODE_BLOCK_RE = /(```[\s\S]*?```)/g;
 const INLINE_CODE_RE = /(`[^`\n]*`)/g;
-const URL_RE = /https?:\/\/[^\s<>"'`]+/g;
+const URL_RE = /https?:\/\/[^\s<>"'`\]]+/g;
 const TRAILING_PUNCT_RE = /[.,;!?\u3002\uff0c\uff1b\uff01\uff1f\u3001]/u;
 const AUTO_LINK_RE = /<\s*(https?:\/\/[^>\s]+)\s*>/g;
 
