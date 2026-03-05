@@ -56,15 +56,36 @@ function splitTrailingPunctuation(rawUrl: string): { url: string; trailing: stri
   return { url, trailing };
 }
 
+// Scan backwards from `offset` to detect if the position is inside a markdown
+// link label [...]. Returns true if an unmatched "[" is found before "]" or
+// newline, meaning this URL sits somewhere inside a label (not necessarily
+// starting right after "[").
+function isInsideMarkdownLinkLabel(offset: number, input: string): boolean {
+  for (let i = offset - 1; i >= 0; i--) {
+    const ch = input[i];
+    if (ch === "[") return true;
+    if (ch === "]" || ch === "\n") return false;
+  }
+  return false;
+}
+
 function wrapBareUrls(text: string): string {
   // Normalize "<https://...>" to explicit markdown links for better Feishu stability.
-  const convertedAutoLinks = text.replace(AUTO_LINK_RE, (_full, rawUrl: string) => {
-    const { url, trailing } = splitTrailingPunctuation(rawUrl);
-    if (!url) {
-      return _full;
-    }
-    return `${buildMarkdownLink(normalizeUrlForFeishu(url))}${trailing}`;
-  });
+  // Skip autolinks that appear inside a markdown destination: ](<https://...>).
+  const convertedAutoLinks = text.replace(
+    AUTO_LINK_RE,
+    (_full, rawUrl: string, offset: number, input: string) => {
+      // ](<https://...>) — angle-bracket destination form; leave as-is.
+      if (offset >= 2 && input.slice(offset - 2, offset) === "](") {
+        return _full;
+      }
+      const { url, trailing } = splitTrailingPunctuation(rawUrl);
+      if (!url) {
+        return _full;
+      }
+      return `${buildMarkdownLink(normalizeUrlForFeishu(url))}${trailing}`;
+    },
+  );
 
   return convertedAutoLinks.replace(URL_RE, (raw, offset, input) => {
     const { url, trailing } = splitTrailingPunctuation(raw);
@@ -72,17 +93,25 @@ function wrapBareUrls(text: string): string {
       return raw;
     }
 
-    // Skip URLs that are already inside a markdown link (label or destination).
-    // Label: preceded by "[" → already a link label, leave as-is.
-    // Destination: preceded by "](" → normalize chars in-place, no re-wrap.
-    const isMarkdownLabel = offset >= 1 && input.slice(offset - 1, offset) === "[";
-    const isMarkdownDestination = offset >= 2 && input.slice(offset - 2, offset) === "](";
-    const normalizedUrl = normalizeUrlForFeishu(url);
-    if (isMarkdownLabel) {
+    // Skip URLs inside a markdown link label (anywhere in [...], not just at start).
+    if (isInsideMarkdownLinkLabel(offset, input)) {
       return raw;
     }
+
+    // Destination: preceded by "](" → normalize chars in-place, no re-wrap.
+    const isMarkdownDestination = offset >= 2 && input.slice(offset - 2, offset) === "](";
+    // Angle-bracket destination: ](<https://...>) — leave completely untouched.
+    const isAngleBracketDest =
+      offset >= 1 &&
+      input[offset - 1] === "<" &&
+      offset >= 3 &&
+      input.slice(offset - 3, offset - 1) === "](";
+    const normalizedUrl = normalizeUrlForFeishu(url);
     if (isMarkdownDestination) {
       return `${normalizedUrl}${trailing}`;
+    }
+    if (isAngleBracketDest) {
+      return raw;
     }
 
     return `${buildMarkdownLink(normalizedUrl)}${trailing}`;

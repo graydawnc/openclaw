@@ -43,4 +43,16 @@ describe("markdown-links", () => {
     const out = normalizeFeishuMarkdownLinks("[https://example.com/a_b](https://example.com/a_b)");
     expect(out).toBe("[https://example.com/a_b](https://example.com/a%5Fb)");
   });
+
+  it("does not wrap URL inside a label that does not start immediately after [", () => {
+    const out = normalizeFeishuMarkdownLinks(
+      "[docs https://example.com/a_b](https://example.com/a_b)",
+    );
+    expect(out).toBe("[docs https://example.com/a_b](https://example.com/a%5Fb)");
+  });
+
+  it("leaves autolink inside markdown angle-bracket destination untouched", () => {
+    const out = normalizeFeishuMarkdownLinks("[site](<https://example.com/a_b>)");
+    expect(out).toBe("[site](<https://example.com/a_b>)");
+  });
 });
