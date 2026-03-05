@@ -214,6 +214,63 @@ describe("registerFeishuChatTools", () => {
       expect(result.details).toMatchObject({ success: true });
     });
 
+    it("append_announcement appends text block for docx announcement", async () => {
+      const tool = setup();
+
+      // getAnnouncement call
+      docxChatAnnouncementGetMock.mockResolvedValueOnce({
+        code: 0,
+        data: { announcement_type: "docx", revision_id: 1 },
+      });
+      docxChatAnnouncementBlockListMock.mockResolvedValueOnce({
+        code: 0,
+        data: { items: [{ block_type: 1, block_id: "blk_page" }] },
+      });
+      // createTextBlock call
+      docxChatAnnouncementBlockChildrenCreateMock.mockResolvedValueOnce({
+        code: 0,
+        data: { block_id: "blk_appended" },
+      });
+
+      const result = await tool.execute("tc_7b", {
+        action: "append_announcement",
+        chat_id: "oc_1",
+        content: "appended text",
+      });
+      expect(result.details).toMatchObject({ success: true });
+    });
+
+    it("append_announcement concatenates content for doc announcement", async () => {
+      const tool = setup();
+
+      // getAnnouncement → doc type
+      docxChatAnnouncementGetMock.mockResolvedValueOnce({
+        code: 0,
+        data: { announcement_type: "doc" },
+      });
+      imChatAnnouncementGetMock.mockResolvedValueOnce({
+        code: 0,
+        data: { content: "existing", revision: 2 },
+      });
+      // writeDocAnnouncement: im.chatAnnouncement.get then patch
+      imChatAnnouncementGetMock.mockResolvedValueOnce({
+        code: 0,
+        data: { content: "existing", revision: 2 },
+      });
+      imChatAnnouncementPatchMock.mockResolvedValueOnce({ code: 0, data: {} });
+
+      const result = await tool.execute("tc_7c", {
+        action: "append_announcement",
+        chat_id: "oc_1",
+        content: "new",
+      });
+      expect(result.details).toMatchObject({ success: true, announcement_type: "doc" });
+      // verify concatenation: patch was called with existing + "\n" + new
+      expect(imChatAnnouncementPatchMock).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ content: "existing\nnew" }) }),
+      );
+    });
+
     it("update_announcement_block patches a block", async () => {
       const tool = setup();
 
@@ -282,10 +339,11 @@ describe("registerFeishuChatTools", () => {
       expect(result.details).toMatchObject({ in_chat: true, chat_id: "oc_1" });
     });
 
-    it("check_bot_in_chat returns in_chat: false on 90003 error", async () => {
+    it("check_bot_in_chat returns in_chat: false when API responds with code 90003", async () => {
       const tool = setup();
 
-      chatGetMock.mockRejectedValueOnce(new Error("error code: 90003"));
+      // Production path: SDK resolves with code 90003 in response body
+      chatGetMock.mockResolvedValueOnce({ code: 90003, msg: "Robot is not in the group" });
 
       const result = await tool.execute("tc_12", {
         action: "check_bot_in_chat",

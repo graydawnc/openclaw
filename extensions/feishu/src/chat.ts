@@ -115,6 +115,10 @@ async function getAnnouncement(client: AnyClient, chatId: string) {
     return { announcement_type: "doc" as const, ...docRes.data };
   }
 
+  if (announcementType !== "docx") {
+    throw new Error(`Unsupported announcement type: ${String(announcementType)}`);
+  }
+
   // docx format: fetch blocks for full content
   const blocksRes = await client.docx.chatAnnouncementBlock.list({ path: { chat_id: chatId } });
   if (blocksRes.code !== 0) throw new Error(blocksRes.msg);
@@ -281,17 +285,12 @@ async function addMembers(client: Lark.Client, chatId: string, userIds: string[]
 }
 
 async function checkBotInChat(client: Lark.Client, chatId: string) {
-  try {
-    const res = await client.im.chat.get({ path: { chat_id: chatId } });
-    if (res.code !== 0) throw new Error(res.msg);
-    return { success: true, chat_id: chatId, in_chat: true, chat_info: res.data };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes("90003")) {
-      return { success: true, chat_id: chatId, in_chat: false, error: "Bot is not in this chat" };
-    }
-    throw err;
+  const res = await client.im.chat.get({ path: { chat_id: chatId } });
+  if (res.code === 90003) {
+    return { success: true, chat_id: chatId, in_chat: false, error: "Bot is not in this chat" };
   }
+  if (res.code !== 0) throw new Error(res.msg);
+  return { success: true, chat_id: chatId, in_chat: true, chat_info: res.data };
 }
 
 async function deleteChat(client: Lark.Client, chatId: string) {
@@ -390,8 +389,14 @@ export function registerFeishuChatTools(api: OpenClawPluginApi) {
         const p = params as FeishuChatParams;
         try {
           const client = getClient();
-          // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-          const chatId = p.chat_id!;
+
+          // Runtime guard: chat_id is required for most actions
+          const needsChatId = p.action !== "create_chat" && p.action !== "create_session_chat";
+          if (needsChatId && !p.chat_id) {
+            return json({ error: `chat_id is required for action: ${p.action}` });
+          }
+          const chatId = p.chat_id ?? "";
+
           switch (p.action) {
             case "members":
               return json(
@@ -404,33 +409,38 @@ export function registerFeishuChatTools(api: OpenClawPluginApi) {
             case "list_announcement_blocks":
               return json(await listAnnouncementBlocks(client, chatId));
             case "get_announcement_block":
-              // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-              return json(await getAnnouncementBlock(client, chatId, p.block_id!));
+              if (!p.block_id)
+                return json({ error: "block_id is required for get_announcement_block" });
+              return json(await getAnnouncementBlock(client, chatId, p.block_id));
             case "write_announcement":
-              // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-              return json(await writeAnnouncement(client, chatId, p.content!));
+              if (!p.content) return json({ error: "content is required for write_announcement" });
+              return json(await writeAnnouncement(client, chatId, p.content));
             case "append_announcement":
-              // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-              return json(await appendAnnouncement(client, chatId, p.content!));
+              if (!p.content) return json({ error: "content is required for append_announcement" });
+              return json(await appendAnnouncement(client, chatId, p.content));
             case "update_announcement_block":
-              return json(
-                // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-                await updateAnnouncementBlock(client, chatId, p.block_id!, p.content!),
-              );
+              if (!p.block_id)
+                return json({ error: "block_id is required for update_announcement_block" });
+              if (!p.content)
+                return json({ error: "content is required for update_announcement_block" });
+              return json(await updateAnnouncementBlock(client, chatId, p.block_id, p.content));
             case "create_chat":
-              // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-              return json(await createChat(client, p.name!, p.user_ids, p.description));
+              if (!p.name) return json({ error: "name is required for create_chat" });
+              return json(await createChat(client, p.name, p.user_ids, p.description));
             case "add_members":
-              // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-              return json(await addMembers(client, chatId, p.user_ids!));
+              if (!p.user_ids?.length)
+                return json({ error: "user_ids is required for add_members" });
+              return json(await addMembers(client, chatId, p.user_ids));
             case "check_bot_in_chat":
               return json(await checkBotInChat(client, chatId));
             case "delete_chat":
               return json(await deleteChat(client, chatId));
             case "create_session_chat":
+              if (!p.name) return json({ error: "name is required for create_session_chat" });
+              if (!p.user_ids?.length)
+                return json({ error: "user_ids is required for create_session_chat" });
               return json(
-                // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-                await createSessionChat(client, p.name!, p.user_ids!, p.greeting, p.description),
+                await createSessionChat(client, p.name, p.user_ids, p.greeting, p.description),
               );
             default:
               return json({ error: `Unknown action: ${String((p as { action: string }).action)}` });
