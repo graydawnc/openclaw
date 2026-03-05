@@ -53,7 +53,7 @@ export const FeishuChatSchema = Type.Object({
   content: Type.Optional(
     Type.String({
       description:
-        "Text content. Required for: write_announcement, append_announcement, update_announcement_block",
+        "Text content. Required for: write_announcement (doc: replaces all; docx: appends new block — full replace not supported by API), append_announcement (doc: concatenates; docx: appends new block), update_announcement_block",
     }),
   ),
   // ── fields used by group management actions ───────────────────────────────
