@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../../config/config.js";
 import { resolveOllamaBaseUrlForRun } from "../../ollama-stream.js";
 import {
-  buildAfterTurnLegacyCompactionParams,
+  buildAfterTurnRuntimeContext,
   composeSystemPromptWithHookContext,
   isOllamaCompatProvider,
   prependSystemPromptAddition,
@@ -13,6 +13,7 @@ import {
   shouldInjectOllamaCompatNumCtx,
   decodeHtmlEntitiesInObject,
   wrapOllamaCompatNumCtx,
+  wrapStreamFnRepairMalformedToolCallArguments,
   wrapStreamFnTrimToolCallNames,
 } from "./attempt.js";
 
@@ -135,9 +136,15 @@ describe("resolvePromptModeForSession", () => {
     expect(resolvePromptModeForSession("agent:main:subagent:child")).toBe("minimal");
   });
 
-  it("uses full mode for cron sessions", () => {
-    expect(resolvePromptModeForSession("agent:main:cron:job-1")).toBe("full");
-    expect(resolvePromptModeForSession("agent:main:cron:job-1:run:run-abc")).toBe("full");
+  it("uses minimal mode for cron sessions", () => {
+    expect(resolvePromptModeForSession("agent:main:cron:job-1")).toBe("minimal");
+    expect(resolvePromptModeForSession("agent:main:cron:job-1:run:run-abc")).toBe("minimal");
+  });
+
+  it("uses full mode for regular and undefined sessions", () => {
+    expect(resolvePromptModeForSession(undefined)).toBe("full");
+    expect(resolvePromptModeForSession("agent:main")).toBe("full");
+    expect(resolvePromptModeForSession("agent:main:thread:abc")).toBe("full");
   });
 });
 
@@ -424,6 +431,182 @@ describe("wrapStreamFnTrimToolCallNames", () => {
   });
 });
 
+describe("wrapStreamFnRepairMalformedToolCallArguments", () => {
+  function createFakeStream(params: { events: unknown[]; resultMessage: unknown }): {
+    result: () => Promise<unknown>;
+    [Symbol.asyncIterator]: () => AsyncIterator<unknown>;
+  } {
+    return {
+      async result() {
+        return params.resultMessage;
+      },
+      [Symbol.asyncIterator]() {
+        return (async function* () {
+          for (const event of params.events) {
+            yield event;
+          }
+        })();
+      },
+    };
+  }
+
+  async function invokeWrappedStream(baseFn: (...args: never[]) => unknown) {
+    const wrappedFn = wrapStreamFnRepairMalformedToolCallArguments(baseFn as never);
+    return await wrappedFn({} as never, {} as never, {} as never);
+  }
+
+  it("repairs anthropic-compatible tool arguments when trailing junk follows valid JSON", async () => {
+    const partialToolCall = { type: "toolCall", name: "read", arguments: {} };
+    const streamedToolCall = { type: "toolCall", name: "read", arguments: {} };
+    const endMessageToolCall = { type: "toolCall", name: "read", arguments: {} };
+    const finalToolCall = { type: "toolCall", name: "read", arguments: {} };
+    const partialMessage = { role: "assistant", content: [partialToolCall] };
+    const endMessage = { role: "assistant", content: [endMessageToolCall] };
+    const finalMessage = { role: "assistant", content: [finalToolCall] };
+    const baseFn = vi.fn(() =>
+      createFakeStream({
+        events: [
+          {
+            type: "toolcall_delta",
+            contentIndex: 0,
+            delta: '{"path":"/tmp/report.txt"}',
+            partial: partialMessage,
+          },
+          {
+            type: "toolcall_delta",
+            contentIndex: 0,
+            delta: "xx",
+            partial: partialMessage,
+          },
+          {
+            type: "toolcall_end",
+            contentIndex: 0,
+            toolCall: streamedToolCall,
+            partial: partialMessage,
+            message: endMessage,
+          },
+        ],
+        resultMessage: finalMessage,
+      }),
+    );
+
+    const stream = await invokeWrappedStream(baseFn);
+    for await (const _item of stream) {
+      // drain
+    }
+    const result = await stream.result();
+
+    expect(partialToolCall.arguments).toEqual({ path: "/tmp/report.txt" });
+    expect(streamedToolCall.arguments).toEqual({ path: "/tmp/report.txt" });
+    expect(endMessageToolCall.arguments).toEqual({ path: "/tmp/report.txt" });
+    expect(finalToolCall.arguments).toEqual({ path: "/tmp/report.txt" });
+    expect(result).toBe(finalMessage);
+  });
+
+  it("keeps incomplete partial JSON unchanged until a complete object exists", async () => {
+    const partialToolCall = { type: "toolCall", name: "read", arguments: {} };
+    const partialMessage = { role: "assistant", content: [partialToolCall] };
+    const baseFn = vi.fn(() =>
+      createFakeStream({
+        events: [
+          {
+            type: "toolcall_delta",
+            contentIndex: 0,
+            delta: '{"path":"/tmp',
+            partial: partialMessage,
+          },
+        ],
+        resultMessage: { role: "assistant", content: [partialToolCall] },
+      }),
+    );
+
+    const stream = await invokeWrappedStream(baseFn);
+    for await (const _item of stream) {
+      // drain
+    }
+
+    expect(partialToolCall.arguments).toEqual({});
+  });
+
+  it("does not repair tool arguments when trailing junk exceeds the Kimi-specific allowance", async () => {
+    const partialToolCall = { type: "toolCall", name: "read", arguments: {} };
+    const streamedToolCall = { type: "toolCall", name: "read", arguments: {} };
+    const partialMessage = { role: "assistant", content: [partialToolCall] };
+    const baseFn = vi.fn(() =>
+      createFakeStream({
+        events: [
+          {
+            type: "toolcall_delta",
+            contentIndex: 0,
+            delta: '{"path":"/tmp/report.txt"}oops',
+            partial: partialMessage,
+          },
+          {
+            type: "toolcall_end",
+            contentIndex: 0,
+            toolCall: streamedToolCall,
+            partial: partialMessage,
+          },
+        ],
+        resultMessage: { role: "assistant", content: [partialToolCall] },
+      }),
+    );
+
+    const stream = await invokeWrappedStream(baseFn);
+    for await (const _item of stream) {
+      // drain
+    }
+
+    expect(partialToolCall.arguments).toEqual({});
+    expect(streamedToolCall.arguments).toEqual({});
+  });
+
+  it("clears a cached repair when later deltas make the trailing suffix invalid", async () => {
+    const partialToolCall = { type: "toolCall", name: "read", arguments: {} };
+    const streamedToolCall = { type: "toolCall", name: "read", arguments: {} };
+    const partialMessage = { role: "assistant", content: [partialToolCall] };
+    const baseFn = vi.fn(() =>
+      createFakeStream({
+        events: [
+          {
+            type: "toolcall_delta",
+            contentIndex: 0,
+            delta: '{"path":"/tmp/report.txt"}',
+            partial: partialMessage,
+          },
+          {
+            type: "toolcall_delta",
+            contentIndex: 0,
+            delta: "x",
+            partial: partialMessage,
+          },
+          {
+            type: "toolcall_delta",
+            contentIndex: 0,
+            delta: "yzq",
+            partial: partialMessage,
+          },
+          {
+            type: "toolcall_end",
+            contentIndex: 0,
+            toolCall: streamedToolCall,
+            partial: partialMessage,
+          },
+        ],
+        resultMessage: { role: "assistant", content: [partialToolCall] },
+      }),
+    );
+
+    const stream = await invokeWrappedStream(baseFn);
+    for await (const _item of stream) {
+      // drain
+    }
+
+    expect(partialToolCall.arguments).toEqual({});
+    expect(streamedToolCall.arguments).toEqual({});
+  });
+});
+
 describe("isOllamaCompatProvider", () => {
   it("detects native ollama provider id", () => {
     expect(
@@ -514,7 +697,7 @@ describe("wrapOllamaCompatNumCtx", () => {
     let payloadSeen: Record<string, unknown> | undefined;
     const baseFn = vi.fn((_model, _context, options) => {
       const payload: Record<string, unknown> = { options: { temperature: 0.1 } };
-      options?.onPayload?.(payload);
+      options?.onPayload?.(payload, _model);
       payloadSeen = payload;
       return {} as never;
     });
@@ -638,9 +821,74 @@ describe("prependSystemPromptAddition", () => {
   });
 });
 
-describe("buildAfterTurnLegacyCompactionParams", () => {
+describe("buildAfterTurnRuntimeContext", () => {
+  it("uses primary model when compaction.model is not set", () => {
+    const legacy = buildAfterTurnRuntimeContext({
+      attempt: {
+        sessionKey: "agent:main:session:abc",
+        messageChannel: "slack",
+        messageProvider: "slack",
+        agentAccountId: "acct-1",
+        authProfileId: "openai:p1",
+        config: {} as OpenClawConfig,
+        skillsSnapshot: undefined,
+        senderIsOwner: true,
+        provider: "openai-codex",
+        modelId: "gpt-5.3-codex",
+        thinkLevel: "off",
+        reasoningLevel: "on",
+        extraSystemPrompt: "extra",
+        ownerNumbers: ["+15555550123"],
+      },
+      workspaceDir: "/tmp/workspace",
+      agentDir: "/tmp/agent",
+    });
+
+    expect(legacy).toMatchObject({
+      provider: "openai-codex",
+      model: "gpt-5.3-codex",
+    });
+  });
+
+  it("passes primary model through even when compaction.model is set (override resolved in compactDirect)", () => {
+    const legacy = buildAfterTurnRuntimeContext({
+      attempt: {
+        sessionKey: "agent:main:session:abc",
+        messageChannel: "slack",
+        messageProvider: "slack",
+        agentAccountId: "acct-1",
+        authProfileId: "openai:p1",
+        config: {
+          agents: {
+            defaults: {
+              compaction: {
+                model: "openrouter/anthropic/claude-sonnet-4-5",
+              },
+            },
+          },
+        } as OpenClawConfig,
+        skillsSnapshot: undefined,
+        senderIsOwner: true,
+        provider: "openai-codex",
+        modelId: "gpt-5.3-codex",
+        thinkLevel: "off",
+        reasoningLevel: "on",
+        extraSystemPrompt: "extra",
+        ownerNumbers: ["+15555550123"],
+      },
+      workspaceDir: "/tmp/workspace",
+      agentDir: "/tmp/agent",
+    });
+
+    // buildAfterTurnLegacyCompactionParams no longer resolves the override;
+    // compactEmbeddedPiSessionDirect does it centrally for both auto + manual paths.
+    expect(legacy).toMatchObject({
+      provider: "openai-codex",
+      model: "gpt-5.3-codex",
+    });
+  });
   it("includes resolved auth profile fields for context-engine afterTurn compaction", () => {
-    const legacy = buildAfterTurnLegacyCompactionParams({
+    const legacy = buildAfterTurnRuntimeContext({
       attempt: {
         sessionKey: "agent:main:session:abc",
         messageChannel: "slack",
