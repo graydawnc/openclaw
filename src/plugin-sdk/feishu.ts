@@ -1,5 +1,5 @@
-// Private helper surface for the bundled feishu plugin.
-// Keep this list additive and scoped to symbols used under extensions/feishu.
+// Private helper surface for feishu channel consumers (bundled and standalone).
+// Keep this list additive and scoped to symbols used by feishu channel plugins.
 
 export type { HistoryEntry } from "../auto-reply/reply/history.js";
 export {
